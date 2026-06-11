@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #111827;
+  background: #f6f8fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.recharts-wrapper text {
+  font-size: 12px;
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-md border border-line bg-white px-3 py-2 text-sm font-medium text-ink shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply border-signal bg-signal text-white hover:bg-teal-800;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-line bg-white px-3 py-2 text-sm outline-none ring-0 transition focus:border-signal focus:ring-2 focus:ring-teal-100;
+  }
+
+  .label {
+    @apply text-xs font-semibold uppercase tracking-normal text-slate-500;
+  }
+
+  .card {
+    @apply rounded-md border border-line bg-panel shadow-sm;
+  }
+}
