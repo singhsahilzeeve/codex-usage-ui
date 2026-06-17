@@ -19,16 +19,23 @@ import {
 } from "recharts";
 import { downloadCsv, downloadJson, downloadMonthlySummary, downloadSessionReport } from "./lib/export";
 import { DEFAULT_PRICING, estimateCost, estimateCredits } from "./lib/pricing";
-import { isSessionFile, parseSessionFile, readFilesFromDirectory } from "./lib/parser";
+import { deriveReasoningEffort, deriveSessionLabels, isSessionFile, parseSessionFile, readFilesFromDirectory } from "./lib/parser";
 import type { Filters, ImportStats, ModelPricing, ParsedSession, PricingSettings } from "./types";
 
 type Page = "import" | "dashboard" | "efficiency" | "sessions" | "reports" | "pricing" | "about";
-type SortKey = "date" | "sessionName" | "workspace" | "model" | "totalTokens" | "cost" | "messages" | "toolCalls";
+type SortKey = "date" | "duration" | "sessionName" | "workspace" | "model" | "totalTokens" | "cost" | "messages" | "toolCalls";
 type ImportProgress = {
   phase: "idle" | "reading" | "extracting" | "parsing" | "saving";
   total: number;
   processed: number;
   currentFile: string;
+};
+
+type SessionCostReason = {
+  title: string;
+  evidence: string;
+  recommendation: string;
+  estimatedSavingsShare: number;
 };
 
 const SESSIONS_KEY = "codex-usage-tracker:sessions";
@@ -217,7 +224,7 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-100 text-ink">
       <header className="border-b border-line bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
             <p className="label">Local analytics</p>
             <h1 className="text-2xl font-semibold tracking-normal">Codex Usage Tracker</h1>
@@ -245,7 +252,7 @@ function App() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6">
+      <main className="mx-auto max-w-[1680px] px-4 py-6">
         {page !== "import" && (
           <FiltersPanel
             sessions={pricedSessions}
@@ -515,8 +522,8 @@ function DashboardPage({
   return (
     <div className="grid gap-5">
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6">
-        <Kpi title="Total estimated spend" value={formatCurrency(summary.totalCost)} />
-        <Kpi title="Total estimated credits" value={formatNumber(summary.totalCredits)} />
+        <Kpi title="Total approximated spend" value={formatCurrency(summary.totalCost)} />
+        <Kpi title="Total approximated credits" value={formatNumber(summary.totalCredits)} />
         <Kpi title="Total tokens" value={formatNumber(summary.totalTokens)} />
         <Kpi title="Input tokens" value={formatNumber(summary.inputTokens)} />
         <Kpi title="Cached tokens" value={formatNumber(summary.cachedTokens)} />
@@ -530,7 +537,7 @@ function DashboardPage({
       </section>
 
       <section className="grid gap-5 xl:grid-cols-2">
-        <ChartCard title="Daily estimated spend trend">
+        <ChartCard title="Daily approximated spend trend">
           <ResponsiveContainer width="100%" height={260}>
             <AreaChart data={chartData}>
               <CartesianGrid strokeDasharray="3 3" />
@@ -629,7 +636,7 @@ function DashboardPage({
                   <th>Workspace</th>
                   <th>Model</th>
                   <th className="text-right">Tokens</th>
-                  <th className="text-right">Estimated cost</th>
+                  <th className="text-right">Approximated cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -684,7 +691,7 @@ function EfficiencyPage({
       <section className="grid gap-4 lg:grid-cols-3">
         {cards.map((card) => (
           <div className="card p-4" key={card.title}>
-            <p className="label">{formatCurrency(card.wastedCost)} estimated impact</p>
+            <p className="label">{formatCurrency(card.wastedCost)} approximated impact</p>
             <h3 className="mt-1 font-semibold">{card.title}</h3>
             <p className="mt-2 text-sm text-slate-600">{card.reason}</p>
             <div className="mt-3 text-sm">
@@ -725,15 +732,17 @@ function SessionsPage({
   onSelect: (session: ParsedSession) => void;
 }) {
   return (
-    <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,420px)]">
+    <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
       <section className="card min-w-0 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1120px] text-left text-sm">
+          <table className="w-full min-w-[1200px] text-left text-sm">
             <thead className="border-b border-line bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <SortableHeader label="Date" sortKey="date" active={sortKey} direction={sortDirection} onSort={onSort} />
+                <SortableHeader label="Duration" sortKey="duration" active={sortKey} direction={sortDirection} onSort={onSort} align="right" />
                 <SortableHeader label="Session name" sortKey="sessionName" active={sortKey} direction={sortDirection} onSort={onSort} />
                 <th className="px-3 py-2">Task heading</th>
+                <SortableHeader label="Approximated cost" sortKey="cost" active={sortKey} direction={sortDirection} onSort={onSort} align="right" />
                 <SortableHeader label="Workspace" sortKey="workspace" active={sortKey} direction={sortDirection} onSort={onSort} />
                 <th className="px-3 py-2 text-right">Child sessions</th>
                 <SortableHeader label="Model" sortKey="model" active={sortKey} direction={sortDirection} onSort={onSort} />
@@ -741,8 +750,7 @@ function SessionsPage({
                 <th className="px-3 py-2 text-right">Input</th>
                 <th className="px-3 py-2 text-right">Cached</th>
                 <th className="px-3 py-2 text-right">Output</th>
-                <th className="px-3 py-2 text-right">Reasoning</th>
-                <SortableHeader label="Estimated cost" sortKey="cost" active={sortKey} direction={sortDirection} onSort={onSort} align="right" />
+                <th className="px-3 py-2">Reasoning</th>
                 <SortableHeader label="Messages" sortKey="messages" active={sortKey} direction={sortDirection} onSort={onSort} align="right" />
                 <SortableHeader label="Tool calls" sortKey="toolCalls" active={sortKey} direction={sortDirection} onSort={onSort} align="right" />
               </tr>
@@ -755,8 +763,10 @@ function SessionsPage({
                   onClick={() => onSelect(session)}
                 >
                   <td className="whitespace-nowrap px-3 py-2">{formatDateTime(session.date)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right">{formatDuration(session.durationMs)}</td>
                   <td className="px-3 py-2 font-medium">{session.sessionName}</td>
                   <td className="px-3 py-2">{session.taskHeading}</td>
+                  <td className="px-3 py-2 text-right">{formatCurrency(session.estimatedCost)}</td>
                   <td className="px-3 py-2">{shortPath(session.workspace)}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(session.childSessions?.length ?? 0)}</td>
                   <td className="px-3 py-2">{session.model}</td>
@@ -764,8 +774,7 @@ function SessionsPage({
                   <td className="px-3 py-2 text-right">{formatNumber(session.usage.inputTokens)}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(session.usage.cachedInputTokens)}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(session.usage.outputTokens)}</td>
-                  <td className="px-3 py-2 text-right">{formatNumber(session.usage.reasoningOutputTokens)}</td>
-                  <td className="px-3 py-2 text-right">{formatCurrency(session.estimatedCost)}</td>
+                  <td className="px-3 py-2">{formatReasoningEffort(session.reasoningEffort)}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(session.userMessages + session.assistantMessages)}</td>
                   <td className="px-3 py-2 text-right">{formatNumber(session.toolCalls)}</td>
                 </tr>
@@ -775,13 +784,13 @@ function SessionsPage({
         </div>
       </section>
       <div className="min-w-0">
-        <SessionDetail session={selectedSession} />
+        <SessionDetail session={selectedSession} allSessions={sessions} />
       </div>
     </div>
   );
 }
 
-function SessionDetail({ session }: { session: ParsedSession | null }) {
+function SessionDetail({ session, allSessions }: { session: ParsedSession | null; allSessions: ParsedSession[] }) {
   if (!session) {
     return <section className="card p-5 text-sm text-slate-600">Import sessions to see details.</section>;
   }
@@ -791,15 +800,17 @@ function SessionDetail({ session }: { session: ParsedSession | null }) {
     { name: "Cached input", value: session.usage.cachedInputTokens },
     { name: "Output", value: session.usage.outputTokens },
   ];
+  const analysis = buildSessionCostAnalysis(session, allSessions);
 
   return (
     <aside className="grid min-w-0 gap-5">
       <section className="card min-w-0 p-5">
         <p className="label">Session detail</p>
         <h2 className="mt-1 break-words text-lg font-semibold">{session.sessionName}</h2>
-        <p className="mt-2 break-words text-sm text-slate-600">{session.firstUserPrompt || "No user prompt was found."}</p>
+        <p className="mt-2 break-words text-sm text-slate-600">{session.primaryTaskPrompt || session.firstUserPrompt || "No user prompt was found."}</p>
         <div className="mt-4 grid gap-2 text-sm">
           <MetricLine label="Date" value={formatDateTime(session.date)} />
+          <MetricLine label="Duration" value={formatDuration(session.durationMs)} />
           <MetricLine label="Workspace" value={shortPath(session.workspace)} />
           <MetricLine label="Model" value={session.model} />
           <MetricLine label="Thread source" value={session.threadSource ?? "user"} />
@@ -812,7 +823,7 @@ function SessionDetail({ session }: { session: ParsedSession | null }) {
       </section>
 
       <section className="card min-w-0 p-5">
-        <h3 className="font-semibold">Estimated cost breakdown</h3>
+        <h3 className="font-semibold">Approximated cost breakdown</h3>
         {session.childSessions?.length ? (
           <p className="mt-1 text-xs text-slate-500">Totals include this session plus child/subagent sessions.</p>
         ) : null}
@@ -821,8 +832,53 @@ function SessionDetail({ session }: { session: ParsedSession | null }) {
           <MetricLine label="Cached input tokens" value={formatNumber(session.usage.cachedInputTokens)} />
           <MetricLine label="Non-cached input" value={formatNumber(session.nonCachedInputTokens)} />
           <MetricLine label="Output tokens" value={formatNumber(session.usage.outputTokens)} />
+          <MetricLine label="Reasoning level" value={formatReasoningEffort(session.reasoningEffort)} />
           <MetricLine label="Reasoning tokens" value={formatNumber(session.usage.reasoningOutputTokens)} />
-          <MetricLine label="Estimated cost" value={formatCurrency(session.estimatedCost)} />
+          <MetricLine label="Approximated cost" value={formatCurrency(session.estimatedCost)} />
+        </div>
+      </section>
+
+      <section className="card min-w-0 p-5">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">Why this session cost this much</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              Derived from the parsed Codex session file, token totals, prompt text, and peer sessions in this import.
+            </p>
+          </div>
+          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+            Save up to {formatCurrency(analysis.estimatedSavings)}
+          </span>
+        </div>
+        <div className="mt-4 grid gap-3">
+          {analysis.reasons.map((reason) => (
+            <div key={reason.title} className="rounded-md border border-line bg-slate-50 p-3">
+              <p className="font-medium text-ink">{reason.title}</p>
+              <p className="mt-1 text-sm text-slate-600">{reason.evidence}</p>
+              <p className="mt-2 text-sm text-signal">{reason.recommendation}</p>
+            </div>
+          ))}
+        </div>
+        {analysis.sourceSignals.length ? (
+          <div className="mt-4 rounded-md border border-teal-200 bg-teal-50 p-3 text-sm text-slate-700">
+            <p className="font-semibold text-ink">Signals found in the source session</p>
+            <div className="mt-2 grid gap-1">
+              {analysis.sourceSignals.map((signal) => (
+                <p key={signal}>{signal}</p>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="card min-w-0 p-5">
+        <h3 className="font-semibold">How to save cost next time</h3>
+        <div className="mt-3 grid gap-2 text-sm text-slate-700">
+          {analysis.savingsTips.map((tip) => (
+            <p key={tip} className="rounded-md border border-line bg-slate-50 px-3 py-2">
+              {tip}
+            </p>
+          ))}
         </div>
       </section>
 
@@ -830,19 +886,21 @@ function SessionDetail({ session }: { session: ParsedSession | null }) {
         <section className="card min-w-0 p-5">
           <h3 className="font-semibold">Included child sessions</h3>
           <div className="mt-3 overflow-x-auto">
-            <table className="w-full min-w-[520px] text-left text-sm">
+            <table className="w-full min-w-[600px] text-left text-sm">
               <thead className="border-b border-line text-xs uppercase text-slate-500">
                 <tr>
                   <th className="py-2">Time</th>
+                  <th className="text-right">Duration</th>
                   <th>Source</th>
                   <th className="text-right">Tokens</th>
-                  <th className="text-right">Estimated cost</th>
+                  <th className="text-right">Approximated cost</th>
                 </tr>
               </thead>
               <tbody>
                 {session.childSessions.map((child) => (
                   <tr key={child.id} className="border-b border-slate-100">
                     <td className="py-2">{formatDateTime(child.date)}</td>
+                    <td className="text-right">{formatDuration(child.durationMs)}</td>
                     <td>{child.source ?? child.threadSource ?? "child"}</td>
                     <td className="text-right">{formatNumber(child.usage.totalTokens)}</td>
                     <td className="text-right">{formatCurrency(child.estimatedCost)}</td>
@@ -944,7 +1002,7 @@ function PricingPage({ pricing, onChange }: { pricing: PricingSettings; onChange
     <section className="card p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="label">Estimated pricing</p>
+          <p className="label">Approximated pricing</p>
           <h2 className="mt-1 text-xl font-semibold">Pricing settings</h2>
         </div>
         <button
@@ -990,12 +1048,12 @@ function PricingPage({ pricing, onChange }: { pricing: PricingSettings; onChange
         <pre className="mt-3 overflow-auto rounded-md bg-white p-3 text-xs text-slate-800">
 {`non_cached_input_tokens = max(input_tokens - cached_input_tokens, 0)
 
-estimated_cost =
+approximated_cost =
   (non_cached_input_tokens / 1,000,000 * input_price_per_1m)
   + (cached_input_tokens / 1,000,000 * cached_input_price_per_1m)
   + (output_tokens / 1,000,000 * output_price_per_1m)
 
-estimated_credits = estimated_cost * credit_conversion_rate`}
+approximated_credits = approximated_cost * credit_conversion_rate`}
         </pre>
         <p className="mt-3">
           Assumptions: `token_count.info.total_token_usage` is cumulative for the session, the largest/latest cumulative event is the final session total, output tokens already include reasoning tokens when the log reports both, and configured prices are user-maintained estimates.
@@ -1053,17 +1111,162 @@ function AboutPage() {
         <pre className="overflow-auto rounded-md bg-slate-950 p-4 text-xs text-slate-100">
 {`non_cached_input_tokens = max(input_tokens - cached_input_tokens, 0)
 
-estimated_cost =
+approximated_cost =
   (non_cached_input_tokens / 1,000,000 * input_price_per_1m)
   + (cached_input_tokens / 1,000,000 * cached_input_price_per_1m)
   + (output_tokens / 1,000,000 * output_price_per_1m)
 
-estimated_credits = estimated_cost * credit_conversion_rate`}
+approximated_credits = approximated_cost * credit_conversion_rate`}
         </pre>
         <p>Displayed dates use the browser timezone reported by `Intl.DateTimeFormat().resolvedOptions().timeZone`.</p>
       </div>
     </section>
   );
+}
+
+function buildSessionCostAnalysis(session: ParsedSession, allSessions: ParsedSession[]) {
+  const summary = buildSummary(allSessions);
+  const avgCost = summary.avgCostPerSession;
+  const messageCount = session.userMessages + session.assistantMessages;
+  const cacheRate = session.usage.inputTokens ? session.usage.cachedInputTokens / session.usage.inputTokens : 0;
+  const sameWorkspaceCount = allSessions.filter((item) => item.workspace === session.workspace).length;
+  const duplicateCount = findDuplicateSessions(allSessions).filter((item) => item.id === session.id).length;
+  const sourceSignals = extractSourceSignals(session);
+  const reasons: SessionCostReason[] = [];
+
+  if (session.nonCachedInputTokens > 15000 && session.nonCachedInputTokens > session.usage.outputTokens * 4) {
+    reasons.push({
+      title: "Large non-cached context dominated the bill",
+      evidence: `${formatNumber(session.nonCachedInputTokens)} non-cached input tokens were sent versus ${formatNumber(session.usage.outputTokens)} output tokens.`,
+      recommendation: "Limit Codex to exact files, trim logs, and avoid whole-repo discovery in the initial prompt.",
+      estimatedSavingsShare: 0.2,
+    });
+  }
+
+  if (session.usage.inputTokens > 10000 && cacheRate < 0.25) {
+    reasons.push({
+      title: "Low cache reuse increased repeat input cost",
+      evidence: `Only ${(cacheRate * 100).toFixed(1)}% of input tokens were cached on ${formatNumber(session.usage.inputTokens)} input tokens.`,
+      recommendation: "Keep related follow-up work in the same thread and reuse stable instructions so more context is cached.",
+      estimatedSavingsShare: 0.15,
+    });
+  }
+
+  if (avgCost > 0 && session.estimatedCost > avgCost * 1.5 && messageCount <= 4) {
+    reasons.push({
+      title: "This was an expensive short session",
+      evidence: `${formatCurrency(session.estimatedCost)} across ${formatNumber(messageCount)} messages is well above the imported average of ${formatCurrency(avgCost)} per session.`,
+      recommendation: "Batch the first prompt better, attach only the files needed, and avoid restarting a similar task from scratch.",
+      estimatedSavingsShare: 0.18,
+    });
+  }
+
+  if (session.usage.outputTokens > 8000 || session.usage.outputTokens > Math.max(session.usage.inputTokens * 0.75, 1)) {
+    reasons.push({
+      title: "Verbose output likely added avoidable spend",
+      evidence: `${formatNumber(session.usage.outputTokens)} output tokens were generated, which is high relative to the session input.`,
+      recommendation: "Ask for concise diffs, capped bullet lists, or exact JSON output instead of long explanations.",
+      estimatedSavingsShare: 0.1,
+    });
+  }
+
+  if (session.toolCalls >= 8 || (session.childSessions?.length ?? 0) >= 2) {
+    reasons.push({
+      title: "Tool loops or child sessions expanded context",
+      evidence: `The session recorded ${formatNumber(session.toolCalls)} tool calls and ${formatNumber(session.childSessions?.length ?? 0)} child sessions.`,
+      recommendation: "Use one targeted validation command, cap auto-fix loops, and keep parallel subagents tightly scoped.",
+      estimatedSavingsShare: 0.12,
+    });
+  }
+
+  if (session.reasoningEffort && ["High", "Extra high", "Mixed"].includes(session.reasoningEffort) && messageCount <= 6) {
+    reasons.push({
+      title: "Reasoning effort may be too high for the work size",
+      evidence: `The session used ${formatReasoningEffort(session.reasoningEffort)} reasoning with only ${formatNumber(messageCount)} messages.`,
+      recommendation: "Use low or medium reasoning for extraction, documentation, and small exact-file edits.",
+      estimatedSavingsShare: 0.08,
+    });
+  }
+
+  if (sameWorkspaceCount >= 5) {
+    reasons.push({
+      title: "The same workspace was reopened many times",
+      evidence: `${formatNumber(sameWorkspaceCount)} imported sessions target ${shortPath(session.workspace)}.`,
+      recommendation: "Use a compact handoff summary when the objective changes instead of repeatedly rediscovering the same project.",
+      estimatedSavingsShare: 0.1,
+    });
+  }
+
+  if (duplicateCount > 0) {
+    reasons.push({
+      title: "This task looks similar to other imported sessions",
+      evidence: "The normalized session heading matches at least one other session in this dataset.",
+      recommendation: "Search prior sessions before starting over and continue an existing thread when the goal has not changed.",
+      estimatedSavingsShare: 0.1,
+    });
+  }
+
+  if (!reasons.length) {
+    reasons.push({
+      title: "Most of the spend appears proportional to the work completed",
+      evidence: "This session does not strongly match the app's high-cost heuristics for large context, low cache reuse, verbose output, or tool loops.",
+      recommendation: "Use it as a baseline and keep prompts scoped to exact files if you want further savings.",
+      estimatedSavingsShare: 0.05,
+    });
+  }
+
+  const savingsTips = unique([
+    "Add a context boundary: exact files only, no full repo scan, ask before opening more files.",
+    "Reuse the same thread for related work so cached input tokens replace repeated fresh context.",
+    "Cap the agent: one implementation attempt, one validation attempt, then stop with logs.",
+    "Run one targeted test or command instead of a broad suite.",
+    "Set output limits such as 'return diff summary only' or 'max 8 bullets'.",
+    session.reasoningEffort && ["High", "Extra high", "Mixed"].includes(session.reasoningEffort)
+      ? "Lower reasoning effort for simple fixes, extraction, and documentation tasks."
+      : "",
+    session.toolCalls >= 8 ? "Reduce tool chatter by giving the likely files and the exact command up front." : "",
+    session.nonCachedInputTokens > session.usage.outputTokens * 4
+      ? "Trim logs, generated files, and unrelated docs before sending them to Codex."
+      : "",
+  ]).filter(Boolean);
+
+  const estimatedSavings = Math.min(
+    session.estimatedCost,
+    reasons.reduce((total, reason) => total + session.estimatedCost * reason.estimatedSavingsShare, 0),
+  );
+
+  return {
+    reasons: reasons.slice(0, 4),
+    savingsTips,
+    sourceSignals,
+    estimatedSavings,
+  };
+}
+
+function extractSourceSignals(session: ParsedSession) {
+  const signals: string[] = [];
+  const prompt = session.firstUserPrompt.toLowerCase();
+
+  if (prompt.includes("whole repo") || prompt.includes("entire repo") || prompt.includes("full repo") || prompt.includes("entire repository")) {
+    signals.push("The first prompt suggests broad repository scope, which usually inflates input-token cost.");
+  }
+  if (prompt.includes("analyze") && prompt.includes("all")) {
+    signals.push("The first prompt appears to ask for broad analysis rather than a narrow exact-file task.");
+  }
+  if (session.rawPreview.includes("\"token_count\"")) {
+    signals.push("The source file contains cumulative token_count events, which this app uses as the session total.");
+  }
+  if (session.childSessions?.length) {
+    signals.push("Child session records were rolled into the parent total, so subagent work contributes to this cost.");
+  }
+  if (session.toolCalls > 0) {
+    signals.push("Tool/function call events were detected in the source log and counted as extra execution steps.");
+  }
+  if (session.reasoningEffort) {
+    signals.push(`Reasoning effort metadata was detected as ${formatReasoningEffort(session.reasoningEffort)}.`);
+  }
+
+  return signals;
 }
 
 function Kpi({ title, value }: { title: string; value: string }) {
@@ -1176,8 +1379,13 @@ function readStoredStats(): ImportStats | null {
 function recalculateSessions(sessions: ParsedSession[], pricing: PricingSettings): ParsedSession[] {
   return sessions.map((session) => {
     const cost = estimateCost(session.usage, session.model, pricing);
+    const labels = deriveSessionLabels(session.firstUserPrompt, session.fileName);
     return {
       ...session,
+      sessionName: labels.sessionName,
+      taskHeading: labels.taskHeading,
+      durationMs: session.durationMs ?? inferDurationFromTimeline(session.tokenTimeline),
+      reasoningEffort: session.reasoningEffort ?? deriveReasoningEffort(session.rawPreview),
       childSessions: undefined,
       estimatedCost: cost,
       estimatedCredits: estimateCredits(cost, pricing),
@@ -1214,6 +1422,11 @@ function rollupChildSessions(sessions: ParsedSession[]): ParsedSession[] {
     parent.userMessages += session.userMessages;
     parent.assistantMessages += session.assistantMessages;
     parent.toolCalls += session.toolCalls;
+    parent.durationMs = mergeSessionDuration(parent, session);
+    parent.reasoningEffort = mergeReasoningEffort(parent.reasoningEffort, session.reasoningEffort);
+    if (new Date(session.date).getTime() < new Date(parent.date).getTime()) {
+      parent.date = session.date;
+    }
     parent.usage = addUsage(parent.usage, session.usage);
     parent.nonCachedInputTokens = Math.max(parent.usage.inputTokens - parent.usage.cachedInputTokens, 0);
     parent.estimatedCost += session.estimatedCost;
@@ -1227,6 +1440,38 @@ function rollupChildSessions(sessions: ParsedSession[]): ParsedSession[] {
     }
     return !byThreadId.has(session.parentThreadId);
   });
+}
+
+function mergeSessionDuration(a: ParsedSession, b: ParsedSession): number | undefined {
+  const startA = new Date(a.date).getTime();
+  const startB = new Date(b.date).getTime();
+  if (!Number.isFinite(startA) || !Number.isFinite(startB)) {
+    return a.durationMs ?? b.durationMs;
+  }
+
+  const start = Math.min(startA, startB);
+  const end = Math.max(startA + (a.durationMs ?? 0), startB + (b.durationMs ?? 0));
+  return Math.max(end - start, 0);
+}
+
+function mergeReasoningEffort(a: string | undefined, b: string | undefined): string | undefined {
+  if (!a) {
+    return b;
+  }
+  if (!b || a === b) {
+    return a;
+  }
+  return "Mixed";
+}
+
+function inferDurationFromTimeline(timeline: ParsedSession["tokenTimeline"]): number | undefined {
+  const timestamps = timeline
+    .map((point) => new Date(point.timestamp).getTime())
+    .filter((timestamp) => Number.isFinite(timestamp));
+  if (timestamps.length < 2) {
+    return undefined;
+  }
+  return Math.max(Math.max(...timestamps) - Math.min(...timestamps), 0);
 }
 
 function addUsage(a: ParsedSession["usage"], b: ParsedSession["usage"]): ParsedSession["usage"] {
@@ -1435,6 +1680,8 @@ function sortValue(session: ParsedSession, key: SortKey) {
   switch (key) {
     case "date":
       return new Date(session.date).getTime();
+    case "duration":
+      return session.durationMs ?? -1;
     case "sessionName":
       return session.sessionName;
     case "workspace":
@@ -1471,6 +1718,33 @@ function formatNumber(value: number) {
 
 function formatCurrency(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 4 }).format(value || 0);
+}
+
+function formatReasoningEffort(value: string | undefined) {
+  return value || "Unknown";
+}
+
+function formatDuration(value: number | undefined) {
+  if (value === undefined || !Number.isFinite(value)) {
+    return "Unknown";
+  }
+
+  const totalSeconds = Math.max(Math.round(value / 1000), 0);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
 }
 
 function formatDateTime(value: string) {

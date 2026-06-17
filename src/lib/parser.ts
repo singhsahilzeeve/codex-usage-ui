@@ -15,7 +15,11 @@ type MutableSession = {
   date?: string;
   workspace?: string;
   model?: string;
+  reasoningEffort?: string;
   firstUserPrompt?: string;
+  primaryTaskPrompt?: string;
+  firstTimestampMs?: number;
+  lastTimestampMs?: number;
   userMessages: number;
   assistantMessages: number;
   toolCalls: number;
@@ -115,9 +119,13 @@ export function parseSessionFile(file: RawFile, pricing: PricingSettings): Parse
 
   const fallbackDate = inferDateFromPath(file.path) ?? new Date().toISOString();
   const date = session.date ?? fallbackDate;
+  const durationMs =
+    session.firstTimestampMs !== undefined && session.lastTimestampMs !== undefined
+      ? Math.max(session.lastTimestampMs - session.firstTimestampMs, 0)
+      : undefined;
   const model = session.model ?? "default";
   const cost = estimateCost(session.latestUsage, model, pricing);
-  const sessionName = buildSessionName(session.firstUserPrompt, file.name);
+  const labels = deriveSessionLabels(session.primaryTaskPrompt ?? session.firstUserPrompt, file.name);
   const tokenTimeline = session.timeline.map((point) => ({
     ...point,
     estimatedCost: estimateCost(
@@ -139,14 +147,17 @@ export function parseSessionFile(file: RawFile, pricing: PricingSettings): Parse
     parentThreadId: session.parentThreadId,
     threadSource: session.threadSource,
     source: session.source,
-    sessionName,
-    taskHeading: sessionName,
+    sessionName: labels.sessionName,
+    taskHeading: labels.taskHeading,
     fileName: file.name,
     filePath: file.path,
     date,
+    durationMs,
     workspace: session.workspace ?? "Unknown workspace",
     model,
+    reasoningEffort: session.reasoningEffort,
     firstUserPrompt: session.firstUserPrompt ?? "",
+    primaryTaskPrompt: session.primaryTaskPrompt,
     userMessages: session.userMessages,
     assistantMessages: session.assistantMessages,
     toolCalls: session.toolCalls,
@@ -165,8 +176,15 @@ export function parseSessionFile(file: RawFile, pricing: PricingSettings): Parse
 
 function consumeEvent(event: any, session: MutableSession) {
   const timestamp = readString(event.timestamp) ?? readString(event.payload?.timestamp);
-  if (timestamp && (!session.date || new Date(timestamp).getTime() < new Date(session.date).getTime())) {
-    session.date = timestamp;
+  if (timestamp) {
+    const timestampMs = new Date(timestamp).getTime();
+    if (Number.isFinite(timestampMs)) {
+      session.firstTimestampMs = session.firstTimestampMs === undefined ? timestampMs : Math.min(session.firstTimestampMs, timestampMs);
+      session.lastTimestampMs = session.lastTimestampMs === undefined ? timestampMs : Math.max(session.lastTimestampMs, timestampMs);
+      if (!session.date || timestampMs < new Date(session.date).getTime()) {
+        session.date = timestamp;
+      }
+    }
   }
 
   if (event.type === "session_meta") {
@@ -176,7 +194,7 @@ function consumeEvent(event: any, session: MutableSession) {
     session.source = readEventSource(event.payload?.source) ?? session.source;
     session.workspace = readString(event.payload?.cwd) ?? session.workspace;
     session.model = readString(event.payload?.model) ?? readString(event.payload?.model_slug) ?? session.model;
-    if (readString(event.payload?.timestamp)) {
+    if (!session.date && readString(event.payload?.timestamp)) {
       session.date = readString(event.payload?.timestamp);
     }
   }
@@ -189,6 +207,8 @@ function consumeEvent(event: any, session: MutableSession) {
   if (directModel) {
     session.model = directModel;
   }
+
+  session.reasoningEffort = readReasoningEffort(event) ?? session.reasoningEffort;
 
   const cwd = readString(event.cwd) ?? readString(event.payload?.cwd) ?? readString(event.payload?.metadata?.cwd);
   if (cwd) {
@@ -212,6 +232,12 @@ function consumeEvent(event: any, session: MutableSession) {
       const cleaned = cleanPrompt(message.text);
       if (cleaned) {
         session.firstUserPrompt = cleaned;
+      }
+    }
+    if (!session.primaryTaskPrompt && message.text) {
+      const cleaned = cleanPrompt(message.text);
+      if (cleaned && !looksLikeBoilerplatePrompt(cleaned)) {
+        session.primaryTaskPrompt = cleaned;
       }
     }
   }
@@ -283,24 +309,157 @@ function pickCumulativeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return b.totalTokens >= a.totalTokens ? b : a;
 }
 
-function buildSessionName(prompt: string | undefined, fileName: string): string {
-  const source = cleanPrompt(prompt ?? "") || fileName || "Untitled session";
-  return source.length > 60 ? `${source.slice(0, 57).trim()}...` : source;
+export function deriveSessionLabels(prompt: string | undefined, fileName: string): Pick<ParsedSession, "sessionName" | "taskHeading"> {
+  const cleaned = cleanPrompt(prompt ?? "");
+  const fallback = normalizeLabel(fileName.replace(/\.jsonl$/i, "")) || "Untitled session";
+  const title = extractReadablePromptTitle(cleaned);
+  const heading = extractReadableTaskHeading(cleaned) ?? title;
+
+  return {
+    sessionName: truncateLabel(title ?? fallback),
+    taskHeading: truncateLabel(heading ?? title ?? fallback),
+  };
+}
+
+export function deriveReasoningEffort(rawPreview: string | undefined): string | undefined {
+  if (!rawPreview) {
+    return undefined;
+  }
+
+  for (const line of rawPreview.split(/\r?\n/)) {
+    try {
+      const effort = readReasoningEffort(JSON.parse(line));
+      if (effort) {
+        return effort;
+      }
+    } catch {
+      const match = line.match(/"effort"\s*:\s*"([^"]+)"/i) ?? line.match(/"reasoning[_-]?effort"\s*:\s*"([^"]+)"/i);
+      const effort = normalizeReasoningEffort(match?.[1]);
+      if (effort) {
+        return effort;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function cleanPrompt(prompt: string): string {
-  const withoutMetadata = prompt
-    .replace(/# Files mentioned by the user:[\s\S]*?## My request for Codex:/i, "")
+  let text = prompt.replace(/\r\n?/g, "\n");
+  const requestParts = text.split(/## My request for Codex:\s*/i);
+  if (requestParts.length > 1) {
+    text = requestParts[requestParts.length - 1];
+  }
+
+  const withoutMetadata = text
     .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, "")
     .replace(/<cwd>[\s\S]*?<\/cwd>/gi, "")
     .replace(/<shell>[\s\S]*?<\/shell>/gi, "")
     .replace(/<current_date>[\s\S]*?<\/current_date>/gi, "")
     .replace(/<timezone>[\s\S]*?<\/timezone>/gi, "")
     .replace(/<filesystem>[\s\S]*?<\/filesystem>/gi, "")
-    .replace(/\s+/g, " ")
+    .replace(/[ \t]+(Task\s*:)/gi, "\n$1")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
   return withoutMetadata.replace(/^## My request for Codex:\s*/i, "").trim();
+}
+
+function looksLikeBoilerplatePrompt(prompt: string): boolean {
+  const sample = prompt.slice(0, 800).toLowerCase();
+  return (
+    sample.includes("# agents.md instructions for") ||
+    sample.includes("# repository agent guide") ||
+    sample.includes("project default mcp servers") ||
+    sample.includes("local codex and claude runtime files are intentionally ignored") ||
+    sample.includes("working rules")
+  );
+}
+
+function extractReadablePromptTitle(prompt: string): string | undefined {
+  if (!prompt || looksLikeBoilerplatePrompt(prompt)) {
+    return undefined;
+  }
+
+  const lines = meaningfulPromptLines(prompt);
+  if (!lines.length) {
+    return undefined;
+  }
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const labeled = line.match(/^(task|goal|objective|request|prompt)\s*:\s*(.*)$/i);
+    if (labeled) {
+      const value = normalizeLabel(labeled[2]);
+      if (value) {
+        return normalizeTitle(value);
+      }
+
+      const nextLine = lines.slice(index + 1).find((candidate) => candidate.length > 0);
+      if (nextLine) {
+        return normalizeTitle(nextLine);
+      }
+    }
+  }
+
+  const firstMeaningful = lines.find((line) => !/^<[^>]+>$/.test(line));
+  return firstMeaningful ? normalizeTitle(firstMeaningful) : undefined;
+}
+
+function extractReadableTaskHeading(prompt: string): string | undefined {
+  if (!prompt || looksLikeBoilerplatePrompt(prompt)) {
+    return undefined;
+  }
+
+  const lines = meaningfulPromptLines(prompt);
+  if (!lines.length) {
+    return undefined;
+  }
+
+  const taskIndex = lines.findIndex((line) => /^(task|goal|objective|request|prompt)\s*:/i.test(line));
+  if (taskIndex >= 0) {
+    const current = lines[taskIndex];
+    const labeled = current.match(/^(task|goal|objective|request|prompt)\s*:\s*(.*)$/i);
+    const inlineValue = normalizeLabel(labeled?.[2]);
+    if (inlineValue) {
+      return normalizeTitle(inlineValue);
+    }
+
+    const nextLine = lines.slice(taskIndex + 1).find((candidate) => candidate.length > 0);
+    if (nextLine) {
+      return normalizeTitle(nextLine);
+    }
+  }
+
+  return extractReadablePromptTitle(prompt);
+}
+
+function meaningfulPromptLines(prompt: string): string[] {
+  return prompt
+    .split("\n")
+    .map((line) => normalizeLabel(line))
+    .filter(Boolean);
+}
+
+function normalizeTitle(value: string): string {
+  return value
+    .replace(/^[-*]\s+/, "")
+    .replace(/\s+/g, " ")
+    .replace(/[.]+\s*$/, "")
+    .trim();
+}
+
+function normalizeLabel(value: string | undefined): string {
+  return (value ?? "")
+    .replace(/^[-*]\s+/, "")
+    .replace(/^#+\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateLabel(value: string): string {
+  return value.length > 140 ? `${value.slice(0, 137).trim()}...` : value;
 }
 
 function extractContentText(content: unknown): string | undefined {
@@ -343,6 +502,54 @@ function readEventSource(value: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function readReasoningEffort(event: any): string | undefined {
+  const payload = event.payload ?? {};
+  return normalizeReasoningEffort(
+    readString(event.reasoning_effort) ??
+      readString(event.reasoningEffort) ??
+      readString(event.model_reasoning_effort) ??
+      readString(event.modelReasoningEffort) ??
+      readString(event.effort) ??
+      readString(event.reasoning?.effort) ??
+      readString(event.model_config?.reasoning_effort) ??
+      readString(event.modelConfig?.reasoningEffort) ??
+      readString(event.metadata?.reasoning_effort) ??
+      readString(event.metadata?.reasoningEffort) ??
+      readString(payload.reasoning_effort) ??
+      readString(payload.reasoningEffort) ??
+      readString(payload.model_reasoning_effort) ??
+      readString(payload.modelReasoningEffort) ??
+      readString(payload.effort) ??
+      readString(payload.reasoning?.effort) ??
+      readString(payload.model_config?.reasoning_effort) ??
+      readString(payload.modelConfig?.reasoningEffort) ??
+      readString(payload.collaboration_mode?.settings?.reasoning_effort) ??
+      readString(payload.collaborationMode?.settings?.reasoningEffort) ??
+      readString(payload.metadata?.reasoning_effort) ??
+      readString(payload.metadata?.reasoningEffort),
+  );
+}
+
+function normalizeReasoningEffort(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase().replace(/[-_\s]+/g, " ");
+  if (normalized === "extra high" || normalized === "xhigh") {
+    return "Extra high";
+  }
+  if (normalized === "high") {
+    return "High";
+  }
+  if (normalized === "medium") {
+    return "Medium";
+  }
+  if (normalized === "low" || normalized === "minimal" || normalized === "none") {
+    return "Low";
+  }
+  return value.trim();
 }
 
 function readNumber(value: unknown): number | undefined {

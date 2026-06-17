@@ -27,9 +27,12 @@ export type ParsedSession = {
   fileName: string;
   filePath: string;
   date: string;
+  durationMs?: number;
   workspace: string;
   model: string;
+  reasoningEffort?: string;
   firstUserPrompt: string;
+  primaryTaskPrompt?: string;
   userMessages: number;
   assistantMessages: number;
   toolCalls: number;

@@ -8,6 +8,8 @@ export function downloadJson(fileName: string, data: unknown) {
 export function downloadCsv(fileName: string, sessions: ParsedSession[]) {
   const headers = [
     "date",
+    "duration",
+    "duration_ms",
     "session_name",
     "task_heading",
     "workspace",
@@ -19,15 +21,18 @@ export function downloadCsv(fileName: string, sessions: ParsedSession[]) {
     "cached_tokens",
     "non_cached_input_tokens",
     "output_tokens",
+    "reasoning_level",
     "reasoning_tokens",
-    "estimated_cost",
-    "estimated_credits",
+    "approximated_cost",
+    "approximated_credits",
     "messages",
     "tool_calls",
     "file_path",
   ];
   const rows = sessions.map((session) => [
     session.date,
+    formatDuration(session.durationMs),
+    session.durationMs ?? "",
     session.sessionName,
     session.taskHeading,
     session.workspace,
@@ -39,6 +44,7 @@ export function downloadCsv(fileName: string, sessions: ParsedSession[]) {
     session.usage.cachedInputTokens,
     session.nonCachedInputTokens,
     session.usage.outputTokens,
+    session.reasoningEffort ?? "",
     session.usage.reasoningOutputTokens,
     session.estimatedCost.toFixed(6),
     session.estimatedCredits.toFixed(4),
@@ -88,6 +94,29 @@ function escapeCsv(value: unknown): string {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return text;
+}
+
+function formatDuration(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return "";
+  }
+
+  const totalSeconds = Math.max(Math.round(value / 1000), 0);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  }
+  return `${seconds}s`;
 }
 
 function safeFileName(name: string): string {
